@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+/dist/
+/build/
+
+# Test temporary files
+test_resume*/
+test_resume*/
+
+# Resume data directory
+.resume/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Log files
+*.log
+
+# Temporary torrent files
+*.torrent.part
+
+# Downloaded files (optional - uncomment if you don't want to track downloads)
+# downloads/
