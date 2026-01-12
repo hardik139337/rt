@@ -10,8 +10,10 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
 use crate::peer::PeerManager;
 use crate::protocol::Message;
-use crate::storage::file::FileStorage;
+use crate::storage::backend::StorageBackend;
+use crate::torrent::info::TorrentFile;
 use crate::error::TorrentError;
+use bytes::Bytes;
 
 /// Download statistics
 #[derive(Debug, Clone, Default)]
@@ -106,10 +108,10 @@ impl PieceDownload {
     }
 }
 
-/// Download manager for torrents
-pub struct DownloadManager {
-    /// File storage for the torrent
-    storage: Arc<RwLock<FileStorage>>,
+/// Download manager for torrents with pluggable storage backends
+pub struct DownloadManager<S: StorageBackend> {
+    /// Storage backend (FileStorage, DriveStorage, or custom)
+    storage: Arc<RwLock<S>>,
     /// Peer manager
     peer_manager: Arc<PeerManager>,
     /// Active piece downloads
@@ -124,10 +126,10 @@ pub struct DownloadManager {
     block_size: u32,
 }
 
-impl DownloadManager {
-    /// Create a new download manager
+impl<S: StorageBackend> DownloadManager<S> {
+    /// Create a new download manager with a storage backend
     pub fn new(
-        storage: Arc<RwLock<FileStorage>>,
+        storage: Arc<RwLock<S>>,
         peer_manager: Arc<PeerManager>,
     ) -> Self {
         info!("Creating download manager");
@@ -153,15 +155,17 @@ impl DownloadManager {
     }
 
     /// Start downloading the torrent
-    pub async fn start_download(&self) -> Result<()> {
-        info!("Starting download");
+    pub async fn start_download(&self, files: Vec<TorrentFile>) -> Result<()> {
+        info!("Starting download with {:?} storage",
+              self.storage.read().await.storage_type());
         
-        // Create file structure if needed
-        let storage = self.storage.read().await;
-        storage.create_files().await
+        // Initialize storage backend with actual torrent files
+        let mut storage = self.storage.write().await;
+        storage.initialize(&files).await
             .map_err(|e| {
-                error!("Failed to create file structure: {}", e);
-                TorrentError::storage_error_full("Failed to create file structure", "unknown".to_string(), e.to_string())
+                error!("Failed to initialize storage: {}", e);
+                TorrentError::storage_error_full("Failed to initialize storage",
+                    "unknown".to_string(), e.to_string())
             })?;
         drop(storage);
 
@@ -372,19 +376,20 @@ impl DownloadManager {
             info!("Piece {} download complete, verifying...", piece_index);
             
             // Get piece data before dropping storage
-            let piece_data = piece.data().to_vec();
+            let piece_data = Bytes::from(piece.data().to_vec());
             // Verify piece
             let is_valid = piece.verify();
             drop(storage);
 
             if is_valid {
-                // Write piece to disk
-                debug!("Piece {} verified, writing to disk", piece_index);
-                let storage = self.storage.read().await;
-                storage.write_piece(piece_index, &piece_data).await
+                // Write piece to storage backend (CHANGED: no longer hardcoded to disk)
+                debug!("Piece {} verified, writing to storage", piece_index);
+                let mut storage = self.storage.write().await;
+                storage.write_piece(piece_index, piece_data).await
                     .map_err(|e| {
-                        error!("Failed to write piece {} to disk: {}", piece_index, e);
-                        TorrentError::storage_error_full("Failed to write piece", "unknown".to_string(), e.to_string())
+                        error!("Failed to write piece {} to storage: {}", piece_index, e);
+                        TorrentError::storage_error_full("Failed to write piece",
+                            "unknown".to_string(), e.to_string())
                     })?;
                 drop(storage);
 
@@ -450,6 +455,18 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// Complete the download
+    pub async fn complete(&self) -> Result<()> {
+        info!("Completing download");
+        
+        let storage = self.storage.read().await;
+        storage.complete().await?;
+        drop(storage);
+        
+        info!("Download completed successfully");
+        Ok(())
+    }
+    
     /// Check if download is complete
     pub async fn is_complete(&self) -> bool {
         let storage = self.storage.read().await;
@@ -523,4 +540,33 @@ impl DownloadManager {
         info!("Resuming download");
         self.request_next_pieces().await
     }
+
+    /// Get the number of verified pieces
+    pub async fn verified_piece_count(&self) -> usize {
+        let storage = self.storage.read().await;
+        storage.verified_count()
+    }
 }
+
+// Manual Clone implementation - only clones the Arc fields
+impl<S: StorageBackend> Clone for DownloadManager<S> {
+    fn clone(&self) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+            peer_manager: Arc::clone(&self.peer_manager),
+            active_downloads: Arc::clone(&self.active_downloads),
+            requested_blocks: Arc::clone(&self.requested_blocks),
+            stats: Arc::clone(&self.stats),
+            max_concurrent_downloads: self.max_concurrent_downloads,
+            block_size: self.block_size,
+        }
+    }
+}
+
+// Type aliases for convenience
+/// Download manager with file storage
+pub type FileDownloadManager = DownloadManager<crate::storage::file::FileStorage>;
+
+/// Download manager with Google Drive storage
+#[cfg(feature = "gdrive")]
+pub type DriveDownloadManager = DownloadManager<crate::storage::drive::DriveStorage>;

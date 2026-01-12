@@ -36,3 +36,5 @@ test_resume*/
 
 # Downloaded files (optional - uncomment if you don't want to track downloads)
 # downloads/
+downloads/*.mp4
+env

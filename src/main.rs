@@ -6,11 +6,12 @@ use anyhow::{Context, Result};
 use rust_torrent_downloader::{
     CliArgs, Config, ProgressDisplay, DownloadStats,
     TorrentParser, TorrentInfo,
-    PeerManager, PeerConnection,
-    DownloadManager as StorageDownloadManager,
+    PeerManager,
     DHT,
     TorrentError,
 };
+use rust_torrent_downloader::torrent::TorrentFile;
+use rust_torrent_downloader::storage::FileDownloadManager;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,7 +87,7 @@ async fn main() -> Result<()> {
             })?
     ));
 
-    let download_manager = Arc::new(StorageDownloadManager::new(
+    let download_manager = Arc::new(FileDownloadManager::new(
         file_storage.clone(),
         peer_manager.clone(),
     ));
@@ -234,105 +235,108 @@ fn display_torrent_info(torrent_info: &TorrentInfo, config: &Config) -> Result<(
     Ok(())
 }
 
-/// Run the download process
+/// Run download process
 async fn run_download(
-torrent_info: &TorrentInfo,
-config: &Config,
-peer_manager: &Arc<PeerManager>,
-download_manager: &Arc<StorageDownloadManager>,
-progress: &mut ProgressDisplay,
-dht: Option<&DHT>,
+    torrent_info: &TorrentInfo,
+    config: &Config,
+    peer_manager: &Arc<PeerManager>,
+    download_manager: &Arc<FileDownloadManager>,
+    progress: &mut ProgressDisplay,
+    dht: Option<&DHT>,
 ) -> Result<()> {
-info!("Starting download for: {}", torrent_info.name);
-debug!("Total size: {} bytes ({} pieces)", torrent_info.total_size(), torrent_info.piece_count());
+    info!("Starting download for: {}", torrent_info.name);
+    debug!("Total size: {} bytes ({} pieces)", torrent_info.total_size(), torrent_info.piece_count());
 
-// Start the download manager
-download_manager.start_download().await
-    .map_err(|e| {
-        error!("Failed to start download manager: {}", e);
-        anyhow::Error::from(TorrentError::storage_error_full("Failed to start download", torrent_info.name.clone(), e.to_string()))
-    })?;
+    // Get files from torrent info for download initialization
+    let files: Vec<rust_torrent_downloader::TorrentFile> = torrent_info.files_iter().map(|f| f.clone()).collect();
 
-// Connect to tracker if enabled
-if config.is_tracker_enabled() && !torrent_info.announce.is_empty() {
-    info!("Contacting tracker: {}", torrent_info.announce);
-    // TODO: Implement tracker communication
-    warn!("Tracker communication not yet implemented");
-}
+    // Start download manager with actual torrent file information
+    download_manager.start_download(files).await
+        .map_err(|e: anyhow::Error| {
+            error!("Failed to start download manager: {}", e);
+            anyhow::Error::from(TorrentError::storage_error_full("Failed to start download", torrent_info.name.clone(), e.to_string()))
+        })?;
 
-// Bootstrap DHT if enabled
-if let Some(dht) = dht {
-    info!("Bootstrapping DHT...");
-    // TODO: Implement DHT bootstrap
-    warn!("DHT bootstrap not yet implemented");
-}
-
-// Main download loop
-let mut last_stats = StorageDownloadManager::get_stats(download_manager).await;
-let mut last_time = std::time::Instant::now();
-let mut loop_count = 0u64;
-
-loop {
-    loop_count += 1;
-    trace!("Download loop iteration {}", loop_count);
-
-    // Check if download is complete
-    if download_manager.is_complete().await {
-        info!("Download complete!");
-        break;
+    // Connect to tracker if enabled
+    if config.is_tracker_enabled() && !torrent_info.announce.is_empty() {
+        info!("Contacting tracker: {}", torrent_info.announce);
+        // TODO: Implement tracker communication
+        warn!("Tracker communication not yet implemented");
     }
 
-    // Get current statistics
-    let current_stats = StorageDownloadManager::get_stats(download_manager).await;
-    let current_time = std::time::Instant::now();
-    let elapsed = current_time.duration_since(last_time);
-
-    // Calculate speeds
-    if elapsed.as_secs() > 0 {
-        let downloaded_delta = current_stats.downloaded_bytes.saturating_sub(last_stats.downloaded_bytes);
-        let uploaded_delta = current_stats.uploaded_bytes.saturating_sub(last_stats.uploaded_bytes);
-
-        let download_speed = downloaded_delta as f64 / elapsed.as_secs_f64();
-        let upload_speed = uploaded_delta as f64 / elapsed.as_secs_f64();
-
-        // Get peer count
-        let peer_count = peer_manager.connected_addresses().await.len();
-        debug!("Connected peers: {}", peer_count);
-
-        // Get progress
-        let progress_value = download_manager.get_progress().await;
-        trace!("Download progress: {:.2}%", progress_value * 100.0);
-
-        // Update progress display
-        let display_stats = DownloadStats {
-            downloaded: current_stats.downloaded_bytes,
-            uploaded: current_stats.uploaded_bytes,
-            download_speed,
-            upload_speed,
-            peers: peer_count,
-            progress: progress_value,
-        };
-
-        progress.update(&display_stats, torrent_info.total_size())?;
-
-        last_stats = current_stats;
-        last_time = current_time;
+    // Bootstrap DHT if enabled
+    if let Some(dht) = dht {
+        info!("Bootstrapping DHT...");
+        // TODO: Implement DHT bootstrap
+        warn!("DHT bootstrap not yet implemented");
     }
 
-    // Request next pieces
-    if let Err(e) = download_manager.request_next_pieces().await {
-        warn!("Failed to request next pieces: {}", e);
+    // Main download loop
+    let mut last_stats = download_manager.get_stats().await;
+    let mut last_time = std::time::Instant::now();
+    let mut loop_count = 0u64;
+
+    loop {
+        loop_count += 1;
+        trace!("Download loop iteration {}", loop_count);
+
+        // Check if download is complete
+        if download_manager.is_complete().await {
+            info!("Download complete!");
+            break;
+        }
+
+        // Get current statistics
+        let current_stats = download_manager.get_stats().await;
+        let current_time = std::time::Instant::now();
+        let elapsed = current_time.duration_since(last_time);
+
+        // Calculate speeds
+        if elapsed.as_secs() > 0 {
+            let downloaded_delta = current_stats.downloaded_bytes.saturating_sub(last_stats.downloaded_bytes);
+            let uploaded_delta = current_stats.uploaded_bytes.saturating_sub(last_stats.uploaded_bytes);
+
+            let download_speed = downloaded_delta as f64 / elapsed.as_secs_f64();
+            let upload_speed = uploaded_delta as f64 / elapsed.as_secs_f64();
+
+            // Get peer count
+            let peer_count = peer_manager.connected_addresses().await.len();
+            debug!("Connected peers: {}", peer_count);
+
+            // Get progress
+            let progress_value = download_manager.get_progress().await;
+            trace!("Download progress: {:.2}%", progress_value * 100.0);
+
+            // Update progress display
+            let display_stats = DownloadStats {
+                downloaded: current_stats.downloaded_bytes,
+                uploaded: current_stats.uploaded_bytes,
+                download_speed,
+                upload_speed,
+                peers: peer_count,
+                progress: progress_value,
+            };
+
+            progress.update(&display_stats, torrent_info.total_size())?;
+
+            last_stats = current_stats;
+            last_time = current_time;
+        }
+
+        // Request next pieces
+        if let Err(e) = download_manager.request_next_pieces().await {
+            warn!("Failed to request next pieces: {}", e);
+        }
+
+        // Wait a bit before next update
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Wait a bit before next update
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    info!("Download loop finished after {} iterations", loop_count);
+    Ok(())
 }
 
-info!("Download loop finished after {} iterations", loop_count);
-Ok(())
-}
-
-/// Run the seeding process
+/// Run seeding process
 async fn run_seeding(config: &Config, progress: &mut ProgressDisplay) -> Result<()> {
     info!("Starting seeding phase");
     debug!("Seed ratio limit: {:?}", config.seed_ratio_limit());

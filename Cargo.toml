@@ -26,6 +26,9 @@ hex = "0.4"
 rand = "0.8"
 bytes = "1.5"
 url = "2.5"
+reqwest = { version = "0.12", features = ["default", "json"], optional = true }
+urlencoding = { version = "2.1", optional = true }
+async-trait = "0.1"
 
 [lib]
 name = "rust_torrent_downloader"
@@ -34,3 +37,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "rust-torrent-downloader"
 path = "src/main.rs"
+
+[features]
+default = ["download"]
+download = ["reqwest"]
+gdrive = ["reqwest", "urlencoding"]

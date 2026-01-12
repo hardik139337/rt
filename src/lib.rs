@@ -12,7 +12,7 @@ pub mod error;
 
 pub use error::TorrentError;
 
-pub use torrent::{TorrentParser, TorrentInfo};
+pub use torrent::{TorrentParser, TorrentInfo, MagnetParser, MagnetInfo, TorrentFile};
 pub use protocol::{Handshake, Message, MessageId};
 pub use peer::{PeerConnection, PeerManager, PeerInfo, PeerState};
 pub use dht::{

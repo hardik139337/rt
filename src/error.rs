@@ -34,6 +34,14 @@ pub enum TorrentError {
         path: Option<String>,
         source: Option<String>,
     },
+    
+    /// Cloud storage errors (Google Drive, etc.)
+    CloudStorageError {
+        message: String,
+        provider: String,
+        source: Option<String>,
+        is_retryable: bool,
+    },
 
     /// DHT (Distributed Hash Table) errors
     DHTError {
@@ -148,6 +156,44 @@ impl TorrentError {
             source: Some(source.into()),
         }
     }
+    
+    /// Create a new CloudStorageError
+    pub fn cloud_storage_error(message: impl Into<String>, provider: impl Into<String>) -> Self {
+        TorrentError::CloudStorageError {
+            message: message.into(),
+            provider: provider.into(),
+            source: None,
+            is_retryable: false,
+        }
+    }
+    
+    /// Create a new CloudStorageError with source
+    pub fn cloud_storage_error_with_source(
+        message: impl Into<String>,
+        provider: impl Into<String>,
+        source: impl Into<String>
+    ) -> Self {
+        TorrentError::CloudStorageError {
+            message: message.into(),
+            provider: provider.into(),
+            source: Some(source.into()),
+            is_retryable: false,
+        }
+    }
+    
+    /// Create a new retryable CloudStorageError
+    pub fn cloud_storage_error_retryable(
+        message: impl Into<String>,
+        provider: impl Into<String>,
+        source: impl Into<String>
+    ) -> Self {
+        TorrentError::CloudStorageError {
+            message: message.into(),
+            provider: provider.into(),
+            source: Some(source.into()),
+            is_retryable: true,
+        }
+    }
 
     /// Create a new DHTError
     pub fn dht_error(message: impl Into<String>) -> Self {
@@ -257,6 +303,9 @@ impl TorrentError {
             TorrentError::NetworkError { source, .. } => {
                 *source = Some(source.as_ref().map_or_else(|| ctx.clone(), |s| format!("{}: {}", s, ctx)));
             }
+            TorrentError::CloudStorageError { source, .. } => {
+                *source = Some(source.as_ref().map_or_else(|| ctx.clone(), |s| format!("{}: {}", s, ctx)));
+            }
             _ => {}
         }
         self
@@ -294,6 +343,14 @@ impl fmt::Display for TorrentError {
                     (Some(p), None) => write!(f, "Storage error: {} (path: {})", message, p),
                     (None, Some(s)) => write!(f, "Storage error: {} (source: {})", message, s),
                     (None, None) => write!(f, "Storage error: {}", message),
+                }
+            }
+            TorrentError::CloudStorageError { message, provider, source, is_retryable } => {
+                match (source, is_retryable) {
+                    (Some(s), true) => write!(f, "Cloud storage error (retryable): {} [{}] (source: {})", message, provider, s),
+                    (Some(s), false) => write!(f, "Cloud storage error: {} [{}] (source: {})", message, provider, s),
+                    (None, true) => write!(f, "Cloud storage error (retryable): {} [{}]", message, provider),
+                    (None, false) => write!(f, "Cloud storage error: {} [{}]", message, provider),
                 }
             }
             TorrentError::DHTError { message, node, source } => {
@@ -431,5 +488,20 @@ mod tests {
         let err = TorrentError::validation_error_with_field("Value out of range", "port");
         assert!(err.to_string().contains("Validation error"));
         assert!(err.to_string().contains("port"));
+    }
+
+    #[test]
+    fn test_cloud_storage_error() {
+        let err = TorrentError::cloud_storage_error("Upload failed", "Google Drive");
+        assert!(err.to_string().contains("Cloud storage error"));
+        assert!(err.to_string().contains("Upload failed"));
+        assert!(err.to_string().contains("Google Drive"));
+    }
+
+    #[test]
+    fn test_cloud_storage_error_retryable() {
+        let err = TorrentError::cloud_storage_error_retryable("Network timeout", "Google Drive", "timeout");
+        assert!(err.to_string().contains("Cloud storage error (retryable)"));
+        assert!(err.to_string().contains("Network timeout"));
     }
 }

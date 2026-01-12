@@ -5,12 +5,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 use tokio::fs;
 use tokio::io::{AsyncWriteExt, AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, error, info, trace, warn};
+use bytes::Bytes;
 use crate::torrent::TorrentInfo;
 use crate::storage::piece::{Piece, PieceStorage, PieceStatus};
+use crate::storage::backend::{StorageBackend, StorageType, StorageMetadata};
+use crate::torrent::info::TorrentFile;
 use crate::error::TorrentError;
 
 /// File storage for torrent data
@@ -139,8 +143,8 @@ impl FileStorage {
         Ok(())
     }
 
-    /// Write a piece to disk
-    pub async fn write_piece(&self, piece_index: u32, data: &[u8]) -> Result<()> {
+    /// Write a piece to disk (internal method)
+    async fn write_piece_internal(&self, piece_index: u32, data: &[u8]) -> Result<()> {
         debug!("Writing piece {} to disk ({} bytes)", piece_index, data.len());
         let offset = piece_index as u64 * self.torrent_info.piece_length;
         self.write_data(offset, data).await?;
@@ -153,8 +157,10 @@ impl FileStorage {
         trace!("Writing data at offset {} ({} bytes)", offset, data.len());
         let mut remaining_data = data;
         let mut current_offset = offset;
- 
-        for file in self.torrent_info.as_ref().files_iter() {
+  
+        // Collect files into a Vec to avoid Send issues with iterator
+        let files: Vec<_> = self.torrent_info.as_ref().files_iter().collect();
+        for file in files {
             let file_path = self.base_path.join(file.path.join("/"));
             let file_start = self.get_file_offset(&file);
             let file_end = file_start + file.length;
@@ -212,8 +218,8 @@ impl FileStorage {
         Ok(())
     }
 
-    /// Read a piece from disk
-    pub async fn read_piece(&self, piece_index: u32) -> Result<Vec<u8>> {
+    /// Read a piece from disk (internal method)
+    async fn read_piece_internal(&self, piece_index: u32) -> Result<Vec<u8>> {
         debug!("Reading piece {} from disk", piece_index);
         let offset = piece_index as u64 * self.torrent_info.piece_length;
         let piece_length = self.pieces.get_piece(piece_index as usize)
@@ -231,8 +237,10 @@ impl FileStorage {
         let mut buffer = Vec::with_capacity(length);
         let mut remaining_length = length as u64;
         let mut current_offset = offset;
- 
-        for file in self.torrent_info.as_ref().files_iter() {
+  
+        // Collect files into a Vec to avoid Send issues with iterator
+        let files: Vec<_> = self.torrent_info.as_ref().files_iter().collect();
+        for file in files {
             let file_path = self.base_path.join(file.path.join("/"));
             let file_start = self.get_file_offset(&file);
             let file_end = file_start + file.length;
@@ -287,7 +295,7 @@ impl FileStorage {
     /// Verify a piece against its hash
     pub async fn verify_piece(&self, piece_index: u32) -> Result<bool> {
         debug!("Verifying piece {}", piece_index);
-        let data = self.read_piece(piece_index).await?;
+        let data = self.read_piece_internal(piece_index).await?;
         let expected_hash = self.torrent_info.as_ref().piece_hash(piece_index as usize)
             .ok_or_else(|| {
                 error!("Invalid piece index: {}", piece_index);
@@ -346,7 +354,7 @@ impl FileStorage {
         for (i, downloaded) in resume_data.downloaded_pieces.iter().enumerate() {
             if *downloaded {
                 // Read piece data from disk
-                if let Ok(data) = self.read_piece(i as u32).await {
+                if let Ok(data) = self.read_piece_internal(i as u32).await {
                     if let Some(piece) = self.pieces.get_piece_mut(i) {
                         piece.verified = true;
                         piece.data = data;
@@ -485,5 +493,70 @@ impl ResumeData {
         let resume_data = Self::deserialize(&data)?;
         info!("Resume data loaded successfully");
         Ok(Some(resume_data))
+    }
+}
+
+/// Implement StorageBackend trait for FileStorage
+#[async_trait]
+impl StorageBackend for FileStorage {
+    async fn initialize(&mut self, files: &[TorrentFile]) -> Result<()> {
+        // For FileStorage, initialize creates the file structure
+        // We ignore the files parameter since we already have torrent_info
+        self.create_files().await
+    }
+    
+    async fn write_piece(&mut self, piece_index: u32, data: Bytes) -> Result<()> {
+        // Convert Bytes to &[u8] for compatibility with existing write_piece
+        // Call the internal write_piece method that takes &[u8]
+        FileStorage::write_piece_internal(self, piece_index, data.as_ref()).await
+    }
+    
+    async fn read_piece(&self, piece_index: u32) -> Result<Option<Bytes>> {
+        // Call the internal read_piece method
+        let data = FileStorage::read_piece_internal(self, piece_index).await?;
+        Ok(Some(Bytes::from(data)))
+    }
+    
+    async fn complete(&self) -> Result<()> {
+        // No-op for file storage - files are already written
+        Ok(())
+    }
+    
+    fn is_complete(&self) -> bool {
+        self.pieces.is_complete()
+    }
+    
+    fn get_progress(&self) -> f64 {
+        self.pieces.progress()
+    }
+    
+    fn verified_count(&self) -> usize {
+        self.pieces.completed_count()
+    }
+    
+    fn total_pieces(&self) -> usize {
+        self.pieces.piece_count()
+    }
+    
+    fn pieces(&self) -> &PieceStorage {
+        &self.pieces
+    }
+    
+    fn pieces_mut(&mut self) -> &mut PieceStorage {
+        &mut self.pieces
+    }
+    
+    fn storage_type(&self) -> StorageType {
+        StorageType::File
+    }
+    
+    fn metadata(&self) -> StorageMetadata {
+        StorageMetadata {
+            storage_type: StorageType::File,
+            base_path: Some(self.base_path.clone()),
+            drive_folder_id: None,
+            total_size: self.torrent_info.total_size(),
+            piece_count: self.pieces.piece_count(),
+        }
     }
 }
