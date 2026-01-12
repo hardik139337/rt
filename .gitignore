@@ -27,6 +27,7 @@ test_resume*/
 .env
 .env.local
 .env.*.local
+env
 
 # Log files
 *.log
